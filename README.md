@@ -193,8 +193,8 @@ Parameters are calibrated per station, providing a **mathematical guarantee that
 #### 1. Clone the Repository
 
 ~~~bash
-git clone https://github.com/fushiginoko/culture-festival-app.git
-cd culture-festival-app
+git clone https://github.com/monorail-labs/toot.git
+cd toot
 npm install
 ~~~
 
@@ -479,8 +479,8 @@ $$
 #### 1. リポジトリの取得
 
 ~~~bash
-git clone https://github.com/fushiginoko/culture-festival-app.git
-cd culture-festival-app
+git clone https://github.com/monorail-labs/toot.git
+cd toot
 npm install
 ~~~
 
