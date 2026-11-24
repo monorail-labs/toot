@@ -237,6 +237,8 @@ npm run build   # tsc -b && vite build
 ### Roadmap
 
 - [ ] **Atomic slot reservation** — The capacity check and the `INSERT` are currently two separate requests, so concurrent orders can exceed 5 per slot. Move both into one PostgreSQL function (RPC) that runs in a single transaction.
+- [ ] **Retry for completion sync** — Queue completions that fail to reach Supabase and resend them on reconnect.
+- [ ] **Distributed code issuance** — Move away from server-only code issuance while keeping protection against client-chosen codes.
 
 ~~~sql
 -- Conceptual sketch
@@ -501,6 +503,8 @@ npm run build   # tsc -b && vite build
 ### ロードマップ
 
 - [ ] **枠予約の原子化** — 現在は定員の確認と `INSERT` が別々のリクエストのため、同時に注文が来ると 1 枠 5 件を超えることがあります。両方を一つのトランザクションで実行する PostgreSQL 関数（RPC）に移します。
+- [ ] **完了同期の再送** — Supabase に届かなかった消し込みをキューに残し、再接続時に送り直します。
+- [ ] **コード発行の分散化** — クライアントによるコードの指定を防ぐ仕組みを保ったまま、サーバーだけに頼る発行から移行します。
 
 ~~~sql
 -- 概念スケッチ
