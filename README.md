@@ -10,7 +10,6 @@
 The Local-First mobile ordering platform engineered for high-density events.
 
 [![Version](https://img.shields.io/badge/version-v1.0.0%20(Golden%20Master)-000000?style=flat-square)](#)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](./LICENSE)
 [![React](https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=white)](https://react.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Rust](https://img.shields.io/badge/Rust-1.96-000000?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)
@@ -38,7 +37,7 @@ The Local-First mobile ordering platform engineered for high-density events.
 - [Quick Start](#quick-start)
 - [Legal & Governance](#legal--governance)
 - [Roadmap](#roadmap)
-- [Team & License](#team--license)
+- [Team](#team)
 
 ---
 
@@ -290,11 +289,10 @@ $$;
 
 ---
 
-### Team & License
+### Team
 
 Developed by **Team MONO Rail**.
 
-Released under the [MIT License](./LICENSE).
 
 <p align="right"><a href="#top">Back to top ↑</a></p>
 
@@ -314,7 +312,7 @@ Released under the [MIT License](./LICENSE).
 - [クイックスタート](#jp-quickstart)
 - [法務・ガバナンス](#jp-legal)
 - [ロードマップ](#jp-roadmap)
-- [チームとライセンス](#jp-license)
+- [チーム](#jp-team)
 
 ---
 
@@ -580,12 +578,11 @@ $$;
 
 ---
 
-<a id="jp-license"></a>
+<a id="jp-team"></a>
 
-### チームとライセンス
+### チーム
 
 開発: **Team MONO Rail**
 
-本ソフトウェアは [MIT License](./LICENSE) のもとで公開されています。
 
 <p align="right"><a href="#top">ページ先頭へ戻る ↑</a></p>
