@@ -7,15 +7,15 @@
 
 **Take Out Of Twelve**
 
-The Local-First mobile ordering platform engineered for high-density events.
+A mobile pre-ordering and pickup system for school festivals and other events.
 
-[![Version](https://img.shields.io/badge/version-v1.0.0%20(Golden%20Master)-000000?style=flat-square)](#)
+[![Version](https://img.shields.io/badge/version-v1.0.0-000000?style=flat-square)](#)
 [![React](https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=white)](https://react.dev/)
-[![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![Rust](https://img.shields.io/badge/Rust-1.96-000000?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-6.0-3178C6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![Rust](https://img.shields.io/badge/Rust-%E2%89%A51.77.2-000000?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![Tauri](https://img.shields.io/badge/Tauri-v2-24C8DB?style=flat-square&logo=tauri&logoColor=white)](https://v2.tauri.app/)
-[![SQLite](https://img.shields.io/badge/SQLite-local--first-003B57?style=flat-square&logo=sqlite&logoColor=white)](https://www.sqlite.org/)
-[![Supabase](https://img.shields.io/badge/Supabase-sync-3FCF8E?style=flat-square&logo=supabase&logoColor=white)](https://supabase.com/)
+[![SQLite](https://img.shields.io/badge/SQLite-local%20replica-003B57?style=flat-square&logo=sqlite&logoColor=white)](https://www.sqlite.org/)
+[![Supabase](https://img.shields.io/badge/Supabase-backend-3FCF8E?style=flat-square&logo=supabase&logoColor=white)](https://supabase.com/)
 
 </div>
 
@@ -31,7 +31,7 @@ The Local-First mobile ordering platform engineered for high-density events.
 ### Table of Contents
 
 - [Overview](#overview)
-- [Core Architecture & Innovations](#core-architecture--innovations)
+- [How It Works](#how-it-works)
 - [System Architecture](#system-architecture)
 - [Tech Stack & Tooling](#tech-stack--tooling)
 - [Quick Start](#quick-start)
@@ -43,129 +43,115 @@ The Local-First mobile ordering platform engineered for high-density events.
 
 ### Overview
 
-TOOT is an event-native mobile ordering platform built for school festivals, open-air markets, and music events — environments where conventional retail infrastructure fails by design.
+TOOT lets festival visitors order food from their phone, pick a 15-minute pickup slot, and collect the order at the counter by showing a 6-character code. Staff run a desktop app that keeps a local SQLite copy of the orders, so counter lookups keep working when the venue Wi-Fi drops.
 
-#### The Problem
+It is made of two applications built from one Vite project:
 
-General-purpose mobile ordering and self-checkout SaaS products assume stable connectivity, account-based customers, and elastic back-of-house capacity. Large-scale events violate all three assumptions:
+| App | Entry | Runs on | Purpose |
+| --- | --- | --- | --- |
+| **Customer web app** | `index.html` → `src/main.tsx` | Phone browser | Menu → pickup slot → ticket with pickup code |
+| **Staff desktop app** | `staff.html` → `src/staff.tsx` | Tauri v2 window | Pickup counter mode and kitchen mode |
 
-| Failure Mode | Root Cause | Consequence |
-| --- | --- | --- |
-| **Register downtime** | Thousands of devices saturating shared cellular and Wi-Fi bands | Cloud-dependent POS stalls; the counter halts |
-| **Checkout abandonment** | Mandatory sign-up, names, phone numbers, email addresses | Friction at the moment of purchase; lost orders |
-| **Queues and food waste** | Orders accepted without regard to kitchen throughput | Unbounded backlogs, cold food, discarded inventory |
+Design principles:
 
-#### The TOOT Approach
-
-TOOT resolves these failure modes through three mutually reinforcing principles:
-
-1. **Local-First** — The store runs on a local SQLite database. The network is an optimization, not a dependency.
-2. **Zero-PII** — No accounts, no personal data. An order is identified solely by a short, human-readable code.
-3. **Parallel Kitchen Capacity Planning** — Order intake is bounded by a throughput model derived from physical cooking capacity, guaranteeing completion within each time slot.
+1. **Zero-PII** — No accounts, no names, phone numbers or email addresses. An order is identified only by its pickup code.
+2. **Local replica at the counter** — The staff app reads from a local SQLite database, so lookup and redemption do not wait on the network.
+3. **Capacity-bounded intake** — Each pickup slot accepts a fixed number of orders, and each item has a per-order quantity cap.
 
 ---
 
-### Core Architecture & Innovations
+### How It Works
 
-#### 1. O(1) Zero-Collision ID Generation (Crockford's Base32)
+#### 1. Customer flow
 
-Each order receives a 6-character code encoded in [Crockford's Base32](https://www.crockford.com/base32.html), an alphabet that excludes the visually ambiguous characters `I`, `L`, `O`, and `U` — optimized for verbal and visual verification at the counter.
+1. **Menu** (`/`) — Choose quantities. Each menu item is capped at **3 per order** (`MAX_ITEM_QUANTITY`). Remaining stock per item is shown as `maxQuantity` (currently a placeholder of 200) minus the total already ordered, read from the Supabase view `product_quantity_totals`. Pressing "受け取り時間を選ぶ" (choose a pickup time) counts as agreeing to the Terms of Service and Privacy Policy.
+2. **Pickup slot** (`/pickup-time`) — Slots run every **15 minutes from 10:00 to 15:00** (20 slots). Availability is computed from the number of non-cancelled orders in each slot against a capacity of **5 orders per slot**:
 
-- **Keyspace:** $32^6 = 1{,}073{,}741{,}824$ (≈ 1.07 billion) combinations.
-- **Scoped matching:** Codes are resolved against a 15-minute time slot, not the global order history. Uniqueness is required only within `(slot_id, order_code)`.
-- **Collision bound:** With at most $n = 5$ orders per slot, the birthday bound yields
+   | Fill ratio | Mark | Meaning |
+   | --- | --- | --- |
+   | < 50% | ◎ | Available |
+   | ≥ 50% | ○ | Filling up |
+   | ≥ 80% | △ | Few left |
+   | 100% | × | Full |
+   | — | 締切 | Closed: ordering for a slot stops 15 minutes before it starts |
+   | — | 終了 | Past: the slot has ended |
 
-$$
-P_{\text{collision}} \approx \frac{n(n-1)}{2 \cdot 32^6} = \frac{10}{1{,}073{,}741{,}824} \approx 9.3 \times 10^{-9}
-$$
+   The grid refreshes every 60 seconds and is re-checked right before submitting. If availability cannot be fetched (e.g. offline), every slot is shown as closed.
+3. **Submit** — The client counts the slot's current orders, and if the slot is not full, `INSERT`s the order into the Supabase `orders` table (`slot_id`, `items`, `total_price`, `status: "pending"`). The **pickup code is issued on the Supabase side** and returned from the insert.
+4. **Ticket** (`/ticket`) — The code, pickup time and items are saved to `localStorage` and shown as a ticket. While a ticket is stored, opening the menu redirects to the ticket. "次の注文を始める" (start next order) clears it after a confirmation.
 
-  — below one in one hundred million.
+#### 2. Pickup codes (Crockford's Base32)
 
-- **No read-before-write:** Codes are generated from a cryptographically secure random source with **zero duplicate-check `SELECT` queries**. Issuance is a single `INSERT` in $O(1)$, keeping throughput flat under peak load. A composite unique constraint acts as a safety net; the statistically negligible conflict case is handled by an optimistic retry.
+- Codes are 6 characters from the [Crockford's Base32](https://www.crockford.com/base32.html) alphabet `0123456789ABCDEFGHJKMNPQRSTVWXYZ`, which omits the easily confused `I`, `L`, `O` and `U`. The keyspace is $32^6 = 1{,}073{,}741{,}824$.
+- Codes are generated **server-side** on purpose, so a client cannot choose its own code (for example `AAAAAA` via DevTools). The Supabase table and its code generation are defined outside this repository.
+- In the staff app, `auth_code` is `UNIQUE` across the whole local database, and lookup is by code alone.
+- The counter input is upper-cased and validated against `^[0-9A-HJKMNP-TV-Z]{6}$` before lookup.
+- `src/lib/crockfordBase32.ts` contains a client-side generator (`generateAuthCode`, using `crypto.getRandomValues`) that the current order flow does not use.
 
-#### 2. Local-First & Fault Tolerance
+#### 3. Staff desktop app
 
-- The store desktop application treats **local SQLite as the source of truth** for all counter operations.
-- Pickup redemption continues with **zero added latency and full availability** under complete network loss, including physical Wi-Fi disconnection.
-- State changes are journaled to a local outbox. Upon reconnection, TOOT **asynchronously reconciles with Supabase**, converging to an eventually consistent state without operator intervention.
+The staff app has two modes, switched from the settings (gear) menu and remembered in `localStorage`.
 
-#### 3. Ultra-Lightweight Desktop Engine
+- **Pickup counter mode (受取窓口)** — Enter the customer's code to look it up in local SQLite (indexed on `auth_code`). The matched order shows items, slot and total. "受け渡しを完了する" (complete handover) marks the order `completed` in SQLite first, then sends the same update to Supabase. If the Supabase update fails, it is logged and **not retried**.
+- **Kitchen mode (厨房キュー)** — Groups all non-completed orders by `slot_id` and sums quantities per item. The earliest slot with open orders is shown as "いま作る枠" (cook now) with a per-item cooked counter; the next two slots are shown as "次の準備" (up next). The cooked counters live in memory only and are reset when a slot leaves the list.
 
-Built on Tauri v2 and Rust 1.96, the store engine is designed for low-power edge hardware such as school-issued laptops.
+#### 4. Sync between Supabase and SQLite
 
-| Metric | Result |
-| --- | --- |
-| Memory footprint (Rust core) | **4.4 MB** |
-| CPU utilization (idle / standby) | **~0%** |
-| Target hardware | Edge devices at **6 W TDP** |
-| Operating profile | Full-day operation on battery power |
+`src/hooks/useOrderSync.ts` (run by the kitchen view) keeps the local database up to date:
 
-> Figures measured on reference hardware. Results may vary by environment.
+- **Initial sync** — On start, fetches every order from Supabase and upserts it into SQLite with the `sync_orders` Tauri command.
+- **Realtime** — Subscribes to Supabase Realtime `INSERT` and `UPDATE` events on `orders` and upserts each one. Disconnects are retried with backoff (1 s, 2 s, 5 s, 10 s, 30 s).
+- **Upsert rule** — Upserts never overwrite a local `completed` status, so a redemption made offline is not reverted by later sync.
+- **Refresh** — Bursts of changes are debounced (250 ms) before the kitchen view re-reads SQLite.
 
-The engine ships with two operating modes:
+The SQLite file is `culture_festival.db`, created in the app's working directory. Debug builds insert three sample orders into an empty database.
 
-- **Pickup Counter Mode** — Indexed lookup on `(slot_id, order_code)` for instantaneous redemption.
-- **Kitchen Display System (KDS) Mode** — Automatically aggregates all items ordered within each 15-minute slot into batch-cooking instructions. Unclaimed items from an expired slot are **automatically re-allocated to the earliest subsequent orders**, eliminating waste by design.
+#### 5. Privacy by design (Zero-PII)
 
-#### 4. Parallel Kitchen Capacity Planning
-
-Order intake is derived backward from the concurrent capacity of each cooking station (griddles, fryers, etc.), rather than from demand.
-
-- **Slot capacity:** 5 customers per 15-minute slot.
-- **Per-customer limit:** 3 items.
-- **Worst-case load:** $5 \times 3 = 15$ items per slot.
-
-Given parallel capacity $C$ (items per batch) and batch cycle time $t_{\text{batch}}$, the worst-case completion time satisfies
-
-$$
-T_{\text{worst}} = \left\lceil \frac{N_{\text{slot}} \cdot q_{\max}}{C} \right\rceil \cdot t_{\text{batch}} \le 15\ \text{min}
-$$
-
-Parameters are calibrated per station, providing a **mathematical guarantee that every order in a slot is completed within that slot**, even under worst-case demand.
-
-#### 5. Privacy by Design (Zero-PII)
-
-- No account creation or authentication is required from customers.
-- TOOT **never requests or stores** personally identifiable information — including names, phone numbers, and email addresses.
-- The attack surface for personal data breaches is structurally eliminated, not merely mitigated.
+- No account creation or sign-in for customers.
+- The order tables hold only slot, items, total, status, timestamps and the pickup code — no names, phone numbers or email addresses.
+- The customer's ticket is stored only in their own browser's `localStorage`.
 
 ---
 
 ### System Architecture
 
 ~~~text
-+---------------------------+                        +------------------------------+
-|   Customer Web Client     |   HTTPS (when online)  |     Supabase (Cloud Sync)    |
-|   React 19 + TypeScript   | ---------------------> |  PostgreSQL  (orders, slots) |
-|                           |  INSERT order          |  Row Level Security (RLS)    |
-|  - Slot selection         |  {slot_id, code, items}|  Realtime channel            |
-|  - O(1) Base32 code gen   |                        |                              |
-|  - Zero-PII (no account)  | <--------------------- |                              |
-+---------------------------+   slot availability    +--------------+---------------+
-                                                                    |
-                                                  Realtime push /   |   ^  Outbox flush
-                                                  pull on reconnect |   |  (async, on reconnect)
-                                                                    v   |
-                                                     +------------------+-------------+
-                                                     |   Store Desktop (Tauri v2)     |
-                                                     |   Rust 1.96 core               |
-                                                     |                                |
-                                                     |   +------------------------+   |
-                                                     |   | SQLite (source of      |   |
-                                                     |   | truth) + outbox queue  |   |
-                                                     |   +-----------+------------+   |
-                                                     |               |                |
-                                                     |       +-------+-------+        |
-                                                     |       |               |        |
-                                                     |  [Pickup Counter] [Kitchen KDS]|
-                                                     |   indexed lookup  slot batch   |
-                                                     |   redemption      aggregation  |
-                                                     |                   auto-slide   |
-                                                     +--------------------------------+
++-----------------------------+                       +-------------------------------+
+|  Customer Web App           |  count slot orders    |  Supabase                     |
+|  React 19 + React Router    | --------------------> |  orders table                 |
+|  (index.html)               |  INSERT order         |   - issues auth_code          |
+|                             | --------------------> |  product_quantity_totals view |
+|  - Menu (3 per item)        | <-------------------- |  Realtime (postgres_changes)  |
+|  - 15-min slots, 5 / slot   |  auth_code            |                               |
+|  - Ticket in localStorage   |                       |                               |
++-----------------------------+                       +---------------+---------------+
+                                                         ^            |
+                                    UPDATE status =      |            | initial fetch +
+                                    'completed'          |            | Realtime INSERT/UPDATE
+                                    (best effort)        |            v
+                                                      +--+----------------------------+
+                                                      |  Staff Desktop App (Tauri v2) |
+                                                      |  staff.html + Rust commands   |
+                                                      |                               |
+                                                      |  +-------------------------+  |
+                                                      |  | SQLite (rusqlite)       |  |
+                                                      |  | culture_festival.db     |  |
+                                                      |  +------------+------------+  |
+                                                      |               |               |
+                                                      |      +--------+--------+      |
+                                                      |      |                 |      |
+                                                      |  [Pickup Counter] [Kitchen]   |
+                                                      |   lookup_order     get_orders |
+                                                      |   complete_order   per-slot   |
+                                                      |                    totals     |
+                                                      +-------------------------------+
 
- Offline path: Counter redemption reads/writes SQLite only -> zero latency, full availability.
- Recovery path: Outbox is replayed to Supabase -> eventual consistency.
+ Offline: lookup and redemption use SQLite only. New orders arrive once Realtime reconnects.
+ Completion sent while offline is applied locally but not re-sent to Supabase.
 ~~~
+
+Tauri commands (`src-tauri/src/lib.rs`): `lookup_order`, `complete_order`, `get_orders`, `sync_orders`.
 
 ---
 
@@ -173,10 +159,10 @@ Parameters are calibrated per station, providing a **mathematical guarantee that
 
 | Layer | Technology |
 | --- | --- |
-| **Client** | React 19, TypeScript, Vite, Bauhaus-inspired minimal CSS |
-| **Desktop** | Tauri v2, Rust 1.96, SQLite via `rusqlite` |
-| **Cloud Sync** | Supabase — PostgreSQL, Realtime, Row Level Security |
-| **Tooling** | Oxlint (TypeScript / JavaScript), Cargo Clippy (Rust) |
+| **Frontend** | React 19, React Router 7, TypeScript ~6.0, Vite 8, React Compiler (via `@rolldown/plugin-babel`) |
+| **Desktop** | Tauri v2, Rust (edition 2021, MSRV 1.77.2), SQLite via `rusqlite` (bundled), `tauri-plugin-log` (debug builds) |
+| **Backend** | Supabase — PostgreSQL, Realtime (`@supabase/supabase-js` v2) |
+| **Tooling** | Oxlint |
 
 ---
 
@@ -184,10 +170,10 @@ Parameters are calibrated per station, providing a **mathematical guarantee that
 
 #### Prerequisites
 
-- Node.js 20 LTS or later
-- Rust 1.96 (`rustup`)
+- Node.js
+- Rust 1.77.2 or later (`rustup`)
 - [Tauri v2 system prerequisites](https://v2.tauri.app/start/prerequisites/) for your OS
-- A Supabase project (for cloud synchronization)
+- A Supabase project with an `orders` table (which issues `auth_code`) and a `product_quantity_totals` view
 
 #### 1. Clone the Repository
 
@@ -197,55 +183,44 @@ cd toot
 npm install
 ~~~
 
-#### 2. Customer Web Client
+#### 2. Environment Variables
 
-Create your local environment file from the template:
+Create `.env` from the template:
 
 ~~~bash
-cp .env.example .env
+cp .env.sample .env
 ~~~
-
-Populate `.env` with your Supabase credentials:
 
 ~~~dotenv
 VITE_SUPABASE_URL=https://<your-project-ref>.supabase.co
-VITE_SUPABASE_ANON_KEY=<your-anon-key>
+VITE_SUPABASE_PUBLISHABLE_KEY=<your-publishable-key>
 ~~~
 
-Start the development server:
+Both apps throw at startup if either value is missing.
+
+> [!WARNING]
+> **Never commit real credentials.** `.env` is excluded via `.gitignore`. Never expose a secret / `service_role` key to the client.
+
+#### 3. Customer Web App
 
 ~~~bash
 npm run dev
 ~~~
 
-> [!WARNING]
-> **Never commit real credentials.** `.env` is excluded via `.gitignore`; only `.env.example` (with placeholder values) belongs in version control. The `service_role` key must never be exposed to the client or committed to the repository. Data access is enforced server-side through Row Level Security.
+Opens on `http://localhost:5173`. The staff UI is also served at `/staff.html`, but its Tauri commands only work inside the desktop app.
 
-#### 3. Store Desktop Application
-
-Run in development mode:
+#### 4. Staff Desktop App
 
 ~~~bash
-npm run tauri dev
+npm run tauri dev     # development
+npm run tauri build   # production bundle
 ~~~
 
-Build a production installer:
+#### 5. Verification
 
 ~~~bash
-npm run tauri build
-~~~
-
-For Windows, pre-built installers are distributed via GitHub Releases:
-
-~~~text
-toot_1.0.0_x64-setup.exe
-~~~
-
-#### 4. Lint & Static Analysis
-
-~~~bash
-npx oxlint
-cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
+npm run lint    # oxlint
+npm run build   # tsc -b && vite build
 ~~~
 
 ---
@@ -254,35 +229,36 @@ cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
 
 | Document | Scope |
 | --- | --- |
-| [`public/terms.html`](./public/terms.html) | **Terms of Service.** Limitation-of-liability clauses are drafted as partial exemptions in consideration of Article 8 of Japan's Consumer Contract Act. Consent is obtained via an **action-wrap** model: submitting an order constitutes acceptance of the terms. |
-| [`public/privacy.html`](./public/privacy.html) | **Privacy Policy.** A formal Zero-PII declaration: TOOT does not collect, process, or retain personally identifiable information. |
+| [`public/terms.html`](./public/terms.html) | **Terms of Service.** The disclaimer is a partial exemption: liability for intent or gross negligence is kept, and liability for slight negligence is limited to direct, ordinary damages. The menu page states that proceeding to pickup-time selection counts as agreement. |
+| [`public/privacy.html`](./public/privacy.html) | **Privacy Policy.** Zero-PII declaration and the three kinds of data handled: order data in Supabase, the ticket in `localStorage`, and infrastructure logs. |
 
 ---
 
 ### Roadmap
 
-- [ ] **Atomic reservation via PostgreSQL RPC** — Move slot reservation into a stored procedure `reserve_order()` executed as a single transaction, eliminating race conditions on slot capacity under extreme concurrent load.
+- [ ] **Atomic slot reservation** — The capacity check and the `INSERT` are currently two separate requests, so concurrent orders can exceed 5 per slot. Move both into one PostgreSQL function (RPC) that runs in a single transaction.
 
 ~~~sql
 -- Conceptual sketch
-CREATE OR REPLACE FUNCTION reserve_order(p_slot_id uuid, p_code text, p_items jsonb)
-RETURNS boolean
+CREATE OR REPLACE FUNCTION reserve_order(p_slot_id text, p_items jsonb, p_total_price integer)
+RETURNS text
 LANGUAGE plpgsql
 AS $$
+DECLARE
+  v_code text;
 BEGIN
-  UPDATE slots
-     SET reserved = reserved + 1
-   WHERE id = p_slot_id
-     AND reserved < capacity;
+  PERFORM pg_advisory_xact_lock(hashtext(p_slot_id));
 
-  IF NOT FOUND THEN
-    RETURN false;
+  IF (SELECT count(*) FROM orders
+       WHERE slot_id = p_slot_id AND status <> 'cancelled') >= 5 THEN
+    RETURN NULL;
   END IF;
 
-  INSERT INTO orders (slot_id, order_code, items)
-  VALUES (p_slot_id, p_code, p_items);
+  INSERT INTO orders (slot_id, items, total_price, status)
+  VALUES (p_slot_id, p_items, p_total_price, 'pending')
+  RETURNING auth_code INTO v_code;
 
-  RETURN true;
+  RETURN v_code;
 END;
 $$;
 ~~~
@@ -292,7 +268,6 @@ $$;
 ### Team
 
 Developed by **Team MONO Rail**.
-
 
 <p align="right"><a href="#top">Back to top ↑</a></p>
 
@@ -306,7 +281,7 @@ Developed by **Team MONO Rail**.
 ### 目次
 
 - [概要](#jp-overview)
-- [コアアーキテクチャと技術的革新](#jp-architecture)
+- [仕組み](#jp-how)
 - [システム構成図](#jp-diagram)
 - [技術スタックとツール](#jp-stack)
 - [クイックスタート](#jp-quickstart)
@@ -320,93 +295,76 @@ Developed by **Team MONO Rail**.
 
 ### 概要
 
-TOOT は、学校文化祭・屋外マーケット・音楽フェスなど、一般的な店舗インフラが構造的に機能しなくなる環境のために設計された、イベント特化型のモバイルオーダープラットフォームです。
+TOOT は、文化祭などのイベント向けのモバイル事前注文・受け取りシステムです。来場者はスマートフォンで商品を選び、15 分刻みの受け取り枠を予約し、6 桁のコードを窓口で見せて商品を受け取ります。スタッフ側のデスクトップアプリは注文をローカルの SQLite に複製して持つため、会場の Wi-Fi が切れても窓口での照合は止まりません。
 
-#### 課題
+一つの Vite プロジェクトから、二つのアプリをビルドします。
 
-汎用のモバイルオーダーやセルフレジ SaaS は、「安定した通信」「アカウントを持つ顧客」「伸縮可能な厨房能力」を前提としています。大規模イベントは、この三つの前提をすべて覆します。
+| アプリ | エントリ | 動作環境 | 役割 |
+| --- | --- | --- | --- |
+| **客側 Web アプリ** | `index.html` → `src/main.tsx` | スマートフォンのブラウザ | メニュー → 受け取り枠 → 受け取りコード付きチケット |
+| **スタッフ用デスクトップアプリ** | `staff.html` → `src/staff.tsx` | Tauri v2 のウィンドウ | 受取窓口モードと厨房モード |
 
-| 破綻モード | 根本原因 | 帰結 |
-| --- | --- | --- |
-| **レジダウン** | 数千台の端末による携帯回線・Wi-Fi 帯域の飽和 | クラウド依存の POS が停止し、窓口業務が止まる |
-| **購入離脱** | 会員登録、氏名・電話番号・メールアドレスの入力要求 | 購入直前の摩擦による注文の取りこぼし |
-| **大行列と食品ロス** | 厨房の処理能力を考慮しない無制限の注文受付 | 滞留の拡大、品質低下、大量の廃棄 |
+設計方針:
 
-#### TOOT の解法
-
-TOOT は、相互に補完し合う三つの原則によってこれらの破綻を解消します。
-
-1. **Local-First** — 店舗はローカルの SQLite 上で動作します。ネットワークは依存先ではなく、最適化の手段に過ぎません。
-2. **Zero-PII** — アカウントも個人情報も不要です。注文は短く判読しやすいコードのみで識別されます。
-3. **並行調理逆算数理モデル** — 物理的な調理能力から導出したスループットモデルで注文受付を制限し、各時間枠内での調理完了を保証します。
+1. **Zero-PII** — アカウント・氏名・電話番号・メールアドレスは不要です。注文は受け取りコードのみで識別します。
+2. **窓口側のローカル複製** — スタッフアプリはローカルの SQLite を参照するため、照合と消し込みがネットワークを待ちません。
+3. **定員による受付制限** — 受け取り枠ごとに受け付ける注文数を固定し、1 注文あたりの各商品の個数にも上限を設けています。
 
 ---
 
-<a id="jp-architecture"></a>
+<a id="jp-how"></a>
 
-### コアアーキテクチャと技術的革新
+### 仕組み
 
-#### 1. O(1) 衝突ゼロ ID 生成（Crockford's Base32）
+#### 1. 客側の流れ
 
-各注文には、[Crockford's Base32](https://www.crockford.com/base32.html) でエンコードされた 6 桁のコードが付与されます。この文字体系は視覚的に紛らわしい `I`・`L`・`O`・`U` を除外しており、窓口での口頭・目視確認に最適化されています。
+1. **メニュー**（`/`）— 個数を選びます。各商品は **1 注文あたり 3 個まで**（`MAX_ITEM_QUANTITY`）です。各商品の残数は、`maxQuantity`（現在は仮の値 200）から、Supabase のビュー `product_quantity_totals` で得た累計注文数を引いて表示します。「受け取り時間を選ぶ」を押すと、利用規約とプライバシーポリシーに同意したものとみなされます。
+2. **受け取り枠**（`/pickup-time`）— 枠は **10:00〜15:00 の 15 分刻み**（20 枠）です。各枠のキャンセル以外の注文数を、**1 枠 5 件**の定員と比べて空き状況を出します。
 
-- **符号空間:** $32^6 = 1{,}073{,}741{,}824$ 通り（約 10.7 億通り）
-- **スコープ限定照合:** コードは全注文履歴ではなく、15 分のタイムスロット内でのみ照合されます。一意性が求められるのは `(slot_id, order_code)` の組のみです。
-- **衝突確率の上界:** 1 スロットあたりの注文数を最大 $n = 5$ とすると、誕生日問題の近似により
+   | 埋まり具合 | 表示 | 意味 |
+   | --- | --- | --- |
+   | 50% 未満 | ◎ | 空きあり |
+   | 50% 以上 | ○ | やや混雑 |
+   | 80% 以上 | △ | 残りわずか |
+   | 100% | × | 満枠 |
+   | — | 締切 | 受付終了。枠の開始 15 分前に締め切る |
+   | — | 終了 | 枠の時間が過ぎた |
 
-$$
-P_{\text{collision}} \approx \frac{n(n-1)}{2 \cdot 32^6} = \frac{10}{1{,}073{,}741{,}824} \approx 9.3 \times 10^{-9}
-$$
+   枠の一覧は 60 秒ごとに更新され、確定の直前にも再取得します。空き状況を取得できないとき（オフラインなど）は、すべての枠を「締切」として表示します。
+3. **確定** — クライアントがその枠の現在の注文数を数え、満枠でなければ Supabase の `orders` テーブルに注文を `INSERT` します（`slot_id`・`items`・`total_price`・`status: "pending"`）。**受け取りコードは Supabase 側で発行**され、`INSERT` の戻り値として受け取ります。
+4. **チケット**（`/ticket`）— コード・受け取り時間・注文内容を `localStorage` に保存し、チケットとして表示します。チケットが保存されている間は、メニューを開いてもチケット画面へ戻ります。「次の注文を始める」を押すと、確認のあとチケットを消去します。
 
-  となり、同一枠内の衝突確率は約 1 億分の 1 以下に抑えられます。
+#### 2. 受け取りコード（Crockford's Base32）
 
-- **書き込み前読み取りの撤廃:** コードは暗号論的に安全な乱数源から生成され、**重複確認のための `SELECT` クエリを 100% 撤廃**しています。発行は単一の `INSERT` による $O(1)$ 操作であり、ピーク時でもスループットは低下しません。複合一意制約をセーフティネットとして配置し、統計的に無視できる衝突ケースは楽観的リトライで処理します。
+- コードは [Crockford's Base32](https://www.crockford.com/base32.html) の文字 `0123456789ABCDEFGHJKMNPQRSTVWXYZ` による 6 桁です。紛らわしい `I`・`L`・`O`・`U` を含みません。符号空間は $32^6 = 1{,}073{,}741{,}824$ 通りです。
+- コードは意図的に**サーバー側で発行**しています。クライアントが自分でコードを決められる状態（DevTools で `AAAAAA` を送るなど）を防ぐためです。Supabase のテーブル定義とコード生成は、このリポジトリの外で管理しています。
+- スタッフアプリでは、`auth_code` はローカル DB 全体で `UNIQUE` であり、照合はコードのみで行います。
+- 窓口の入力は大文字に変換し、`^[0-9A-HJKMNP-TV-Z]{6}$` で形式を確認してから照合します。
+- `src/lib/crockfordBase32.ts` にはクライアント側の生成関数（`generateAuthCode`、`crypto.getRandomValues` を使用）がありますが、現在の注文処理では使っていません。
 
-#### 2. Local-First と耐障害性
+#### 3. スタッフ用デスクトップアプリ
 
-- 店舗側デスクトップアプリは、窓口業務のすべてにおいて**ローカル SQLite を唯一の正（Source of Truth）**として扱います。
-- Wi-Fi の物理切断を含む完全なオフライン環境下でも、受取消し込みは**追加遅延ゼロ・可用性 100%** で継続します。
-- 状態変更はローカルのアウトボックスに記録され、通信復旧時に **Supabase と自動的に非同期同期**されます。オペレーターの介入なしに結果整合性へ収束します。
+設定（歯車）メニューで二つのモードを切り替えます。選んだモードは `localStorage` に保存されます。
 
-#### 3. 超軽量デスクトップエンジン
+- **受取窓口モード** — お客様のコードを入力し、ローカル SQLite から照合します（`auth_code` にインデックスあり）。見つかった注文の品目・受取枠・合計金額を表示します。「受け渡しを完了する」を押すと、まず SQLite 上で `completed` にし、続けて Supabase にも同じ更新を送ります。Supabase への更新に失敗した場合はログに残すだけで、**再送はしません**。
+- **厨房モード（厨房キュー）** — 未完了の注文を `slot_id` ごとにまとめ、商品ごとの個数を合計します。未完了の注文がある最も早い枠を「いま作る枠」として、商品ごとの調理済みカウンターとともに表示し、続く 2 枠を「次の準備」として表示します。調理済みカウンターはメモリ上だけに持ち、その枠が一覧から消えるとリセットされます。
 
-Tauri v2 と Rust 1.96 で構築された店舗エンジンは、学校配布端末などの低電力エッジハードウェアでの稼働を前提に設計されています。
+#### 4. Supabase と SQLite の同期
 
-| 指標 | 結果 |
-| --- | --- |
-| メモリフットプリント（Rust コア） | **4.4 MB** |
-| CPU 使用率（アイドル／待機時） | **約 0%** |
-| 想定ハードウェア | **TDP 6W** 級のエッジ端末 |
-| 稼働プロファイル | バッテリー駆動による終日運用 |
+`src/hooks/useOrderSync.ts`（厨房モードで動作）がローカル DB を最新に保ちます。
 
-> 数値はリファレンス環境での実測値です。環境により異なる場合があります。
+- **初回同期** — 起動時に Supabase から全注文を取得し、Tauri コマンド `sync_orders` で SQLite に upsert します。
+- **リアルタイム** — Supabase Realtime で `orders` の `INSERT`・`UPDATE` を購読し、1 件ずつ upsert します。切断時は間隔を広げながら再接続します（1 秒・2 秒・5 秒・10 秒・30 秒）。
+- **upsert の規則** — ローカルで `completed` になった注文の状態は上書きしません。オフライン中に消し込んだ注文が、後の同期で元に戻ることはありません。
+- **画面の更新** — 短時間に続いた変更は 250 ms まとめてから、厨房画面が SQLite を読み直します。
 
-エンジンは二つの動作モードを備えています。
-
-- **受取窓口モード** — `(slot_id, order_code)` に対するインデックス照合による即時消し込み。
-- **厨房 KDS（Kitchen Display System）モード** — 15 分枠内の全注文品目を自動合算し、まとめ調理の指示として表示します。時間切れで未受取となった在庫は、**直近の後続注文へ自動的にスライド転用**され、廃棄ゼロを設計レベルで実現します。
-
-#### 4. 並行調理逆算モデルによる数理的調理保証
-
-注文受付の上限は、需要ではなく、鉄板・フライヤー等の各調理ステーションの同時並行処理能力から逆算して決定されます。
-
-- **スロット定員:** 15 分あたり 5 人
-- **1 人あたり上限:** 3 個
-- **最悪時負荷:** 1 スロットあたり $5 \times 3 = 15$ 個
-
-並行処理能力を $C$（1 バッチあたりの個数）、1 バッチの調理時間を $t_{\text{batch}}$ とすると、最悪条件下の完了時間は次式を満たします。
-
-$$
-T_{\text{worst}} = \left\lceil \frac{N_{\text{slot}} \cdot q_{\max}}{C} \right\rceil \cdot t_{\text{batch}} \le 15\ \text{min}
-$$
-
-各パラメータはステーションごとに校正され、最悪の需要条件下でも**スロット内の全注文がそのスロット内で 100% 調理完了する**ことを数理的に保証します。
+SQLite のファイルは `culture_festival.db` で、アプリの作業ディレクトリに作られます。デバッグビルドでは、DB が空のときにサンプル注文を 3 件入れます。
 
 #### 5. プライバシー・バイ・デザイン（Zero-PII）
 
-- 顧客にアカウント作成や認証を一切求めません。
-- 氏名・電話番号・メールアドレスを含む**個人識別情報を一切要求・保持しません**。
-- 個人情報漏えいのリスクは「低減」ではなく、構造的に「消滅」しています。
+- 客にアカウント作成やログインを求めません。
+- 注文テーブルが持つのは、受取枠・品目・合計金額・状態・日時・受け取りコードだけです。氏名・電話番号・メールアドレスは持ちません。
+- 客のチケットは、その人のブラウザの `localStorage` にだけ保存されます。
 
 ---
 
@@ -415,38 +373,41 @@ $$
 ### システム構成図
 
 ~~~text
-+---------------------------+                        +------------------------------+
-|   Customer Web Client     |   HTTPS (when online)  |     Supabase (Cloud Sync)    |
-|   React 19 + TypeScript   | ---------------------> |  PostgreSQL  (orders, slots) |
-|                           |  INSERT order          |  Row Level Security (RLS)    |
-|  - Slot selection         |  {slot_id, code, items}|  Realtime channel            |
-|  - O(1) Base32 code gen   |                        |                              |
-|  - Zero-PII (no account)  | <--------------------- |                              |
-+---------------------------+   slot availability    +--------------+---------------+
-                                                                    |
-                                                  Realtime push /   |   ^  Outbox flush
-                                                  pull on reconnect |   |  (async, on reconnect)
-                                                                    v   |
-                                                     +------------------+-------------+
-                                                     |   Store Desktop (Tauri v2)     |
-                                                     |   Rust 1.96 core               |
-                                                     |                                |
-                                                     |   +------------------------+   |
-                                                     |   | SQLite (source of      |   |
-                                                     |   | truth) + outbox queue  |   |
-                                                     |   +-----------+------------+   |
-                                                     |               |                |
-                                                     |       +-------+-------+        |
-                                                     |       |               |        |
-                                                     |  [Pickup Counter] [Kitchen KDS]|
-                                                     |   indexed lookup  slot batch   |
-                                                     |   redemption      aggregation  |
-                                                     |                   auto-slide   |
-                                                     +--------------------------------+
++-----------------------------+                       +-------------------------------+
+|  Customer Web App           |  count slot orders    |  Supabase                     |
+|  React 19 + React Router    | --------------------> |  orders table                 |
+|  (index.html)               |  INSERT order         |   - issues auth_code          |
+|                             | --------------------> |  product_quantity_totals view |
+|  - Menu (3 per item)        | <-------------------- |  Realtime (postgres_changes)  |
+|  - 15-min slots, 5 / slot   |  auth_code            |                               |
+|  - Ticket in localStorage   |                       |                               |
++-----------------------------+                       +---------------+---------------+
+                                                         ^            |
+                                    UPDATE status =      |            | initial fetch +
+                                    'completed'          |            | Realtime INSERT/UPDATE
+                                    (best effort)        |            v
+                                                      +--+----------------------------+
+                                                      |  Staff Desktop App (Tauri v2) |
+                                                      |  staff.html + Rust commands   |
+                                                      |                               |
+                                                      |  +-------------------------+  |
+                                                      |  | SQLite (rusqlite)       |  |
+                                                      |  | culture_festival.db     |  |
+                                                      |  +------------+------------+  |
+                                                      |               |               |
+                                                      |      +--------+--------+      |
+                                                      |      |                 |      |
+                                                      |  [Pickup Counter] [Kitchen]   |
+                                                      |   lookup_order     get_orders |
+                                                      |   complete_order   per-slot   |
+                                                      |                    totals     |
+                                                      +-------------------------------+
 ~~~
 
-- **オフライン経路:** 窓口の消し込みは SQLite のみで完結し、遅延ゼロ・可用性 100% を維持します。
-- **復旧経路:** アウトボックスが Supabase へ再送され、結果整合性へ収束します。
+- **オフライン時:** 照合と消し込みは SQLite だけで完結します。新しい注文は Realtime の再接続後に届きます。
+- **オフライン中の消し込み:** ローカルには反映されますが、Supabase へは再送されません。
+
+Tauri コマンド（`src-tauri/src/lib.rs`）: `lookup_order`・`complete_order`・`get_orders`・`sync_orders`
 
 ---
 
@@ -456,10 +417,10 @@ $$
 
 | レイヤー | 技術 |
 | --- | --- |
-| **クライアント** | React 19、TypeScript、Vite、バウハウス様式に着想を得たミニマル CSS |
-| **デスクトップ** | Tauri v2、Rust 1.96、SQLite（`rusqlite`） |
-| **クラウド同期** | Supabase（PostgreSQL、Realtime、Row Level Security） |
-| **ツール** | Oxlint（TypeScript / JavaScript）、Cargo Clippy（Rust） |
+| **フロントエンド** | React 19、React Router 7、TypeScript ~6.0、Vite 8、React Compiler（`@rolldown/plugin-babel` 経由） |
+| **デスクトップ** | Tauri v2、Rust（edition 2021、MSRV 1.77.2）、SQLite（`rusqlite`、bundled）、`tauri-plugin-log`（デバッグビルドのみ） |
+| **バックエンド** | Supabase（PostgreSQL、Realtime、`@supabase/supabase-js` v2） |
+| **ツール** | Oxlint |
 
 ---
 
@@ -469,10 +430,10 @@ $$
 
 #### 前提条件
 
-- Node.js 20 LTS 以降
-- Rust 1.96（`rustup` で導入）
+- Node.js
+- Rust 1.77.2 以降（`rustup` で導入）
 - 各 OS 向けの [Tauri v2 前提環境](https://v2.tauri.app/start/prerequisites/)
-- Supabase プロジェクト（クラウド同期用）
+- `orders` テーブル（`auth_code` を発行するもの）と `product_quantity_totals` ビューを持つ Supabase プロジェクト
 
 #### 1. リポジトリの取得
 
@@ -482,55 +443,44 @@ cd toot
 npm install
 ~~~
 
-#### 2. 客側 Web クライアント
+#### 2. 環境変数
 
-テンプレートからローカル環境変数ファイルを作成します。
+テンプレートから `.env` を作成します。
 
 ~~~bash
-cp .env.example .env
+cp .env.sample .env
 ~~~
-
-`.env` に Supabase の接続情報を設定します。
 
 ~~~dotenv
 VITE_SUPABASE_URL=https://<your-project-ref>.supabase.co
-VITE_SUPABASE_ANON_KEY=<your-anon-key>
+VITE_SUPABASE_PUBLISHABLE_KEY=<your-publishable-key>
 ~~~
 
-開発サーバーを起動します。
+どちらかが未設定だと、両アプリとも起動時にエラーになります。
+
+> [!WARNING]
+> **実際の認証情報は絶対にコミットしないでください。** `.env` は `.gitignore` で除外されています。secret / `service_role` キーはクライアントに渡さないでください。
+
+#### 3. 客側 Web アプリ
 
 ~~~bash
 npm run dev
 ~~~
 
-> [!WARNING]
-> **実際の認証情報は絶対にコミットしないでください。** `.env` は `.gitignore` によって除外されており、バージョン管理に含めるのはプレースホルダー値のみを記載した `.env.example` だけです。`service_role` キーはクライアントに露出させず、リポジトリにも含めないでください。データアクセスの制御は Row Level Security によりサーバー側で強制されます。
+`http://localhost:5173` で開きます。スタッフ画面も `/staff.html` で表示されますが、Tauri コマンドはデスクトップアプリの中でしか動きません。
 
-#### 3. 店舗デスクトップアプリ
-
-開発モードで起動します。
+#### 4. スタッフ用デスクトップアプリ
 
 ~~~bash
-npm run tauri dev
+npm run tauri dev     # 開発
+npm run tauri build   # 本番ビルド
 ~~~
 
-本番用インストーラーをビルドします。
+#### 5. 検証
 
 ~~~bash
-npm run tauri build
-~~~
-
-Windows 向けのビルド済みインストーラーは GitHub Releases で配布しています。
-
-~~~text
-toot_1.0.0_x64-setup.exe
-~~~
-
-#### 4. Lint・静的解析
-
-~~~bash
-npx oxlint
-cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
+npm run lint    # oxlint
+npm run build   # tsc -b && vite build
 ~~~
 
 ---
@@ -541,8 +491,8 @@ cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
 
 | ドキュメント | 内容 |
 | --- | --- |
-| [`public/terms.html`](./public/terms.html) | **利用規約。** 免責条項は、消費者契約法第 8 条に配慮し、全部免責ではなく一部免責として設計しています。同意取得には **Action-wrap 方式**を採用し、注文の送信をもって規約への同意とみなします。 |
-| [`public/privacy.html`](./public/privacy.html) | **プライバシーポリシー。** Zero-PII 宣言として、TOOT が個人識別情報を一切収集・処理・保持しないことを明示しています。 |
+| [`public/terms.html`](./public/terms.html) | **利用規約。** 免責条項は一部免責です。故意・重過失による損害は責任を負い、軽過失による損害は直接かつ通常の損害に限ります。メニュー画面で、受け取り時間の選択へ進むことをもって同意とみなす旨を表示しています。 |
+| [`public/privacy.html`](./public/privacy.html) | **プライバシーポリシー。** Zero-PII 宣言と、取り扱う 3 種類のデータ（Supabase 上の注文データ、`localStorage` のチケット、インフラのログ）を定めています。 |
 
 ---
 
@@ -550,28 +500,29 @@ cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
 
 ### ロードマップ
 
-- [ ] **PostgreSQL RPC による原子的予約処理** — スロット予約処理を単一トランザクションで実行されるストアドプロシージャ `reserve_order()` に移行し、超大規模同時アクセス時のスロット定員に関する競合状態（Race Condition）を完全に排除します。
+- [ ] **枠予約の原子化** — 現在は定員の確認と `INSERT` が別々のリクエストのため、同時に注文が来ると 1 枠 5 件を超えることがあります。両方を一つのトランザクションで実行する PostgreSQL 関数（RPC）に移します。
 
 ~~~sql
 -- 概念スケッチ
-CREATE OR REPLACE FUNCTION reserve_order(p_slot_id uuid, p_code text, p_items jsonb)
-RETURNS boolean
+CREATE OR REPLACE FUNCTION reserve_order(p_slot_id text, p_items jsonb, p_total_price integer)
+RETURNS text
 LANGUAGE plpgsql
 AS $$
+DECLARE
+  v_code text;
 BEGIN
-  UPDATE slots
-     SET reserved = reserved + 1
-   WHERE id = p_slot_id
-     AND reserved < capacity;
+  PERFORM pg_advisory_xact_lock(hashtext(p_slot_id));
 
-  IF NOT FOUND THEN
-    RETURN false;
+  IF (SELECT count(*) FROM orders
+       WHERE slot_id = p_slot_id AND status <> 'cancelled') >= 5 THEN
+    RETURN NULL;
   END IF;
 
-  INSERT INTO orders (slot_id, order_code, items)
-  VALUES (p_slot_id, p_code, p_items);
+  INSERT INTO orders (slot_id, items, total_price, status)
+  VALUES (p_slot_id, p_items, p_total_price, 'pending')
+  RETURNING auth_code INTO v_code;
 
-  RETURN true;
+  RETURN v_code;
 END;
 $$;
 ~~~
@@ -583,6 +534,5 @@ $$;
 ### チーム
 
 開発: **Team MONO Rail**
-
 
 <p align="right"><a href="#top">ページ先頭へ戻る ↑</a></p>
